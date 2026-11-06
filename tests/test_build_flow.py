@@ -74,6 +74,24 @@ class FlowTests(unittest.TestCase):
                                        note_body="@example-member", **changes), [])
         self.assertEqual(self.recipients(assignee_ids=[], note_body="@example-member"), [])
 
+    def test_native_gitlab_payload_matches_legacy(self):
+        events = [self.event, dict(self.event, action="update", previous_assignees=[{"id":10002}]),
+            dict(self.event, event_kind="note", action="create", issue_author_id=10998,
+                 issue_assignee_ids=[], issue_title="Native reply", issue_iid=7,
+                 system=False, noteable_type="Issue", note_body="长回复 " * 2000 + " @example-member")]
+        for event in events:
+            native = {}
+            for key, value in event.items():
+                parts = flow.NATIVE_EVENT_PATHS[key]
+                current = native
+                for part in parts[:-1]:
+                    current = current.setdefault(part, {})
+                current[parts[-1]] = value
+            with self.subTest(kind=event["event_kind"]):
+                self.assertEqual(flow.simulate(self.config, native), flow.simulate(self.config, event))
+        self.assertEqual(flow.simulate(self.config, native)["recipients"], ["member@example.com"])
+        self.assertNotIn("长回复", json.dumps(flow.simulate(self.config, native)["card"], ensure_ascii=False))
+
     def test_mention_boundaries_and_code(self):
         cases = {
             "@example-member": True,

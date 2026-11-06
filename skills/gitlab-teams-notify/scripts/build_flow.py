@@ -117,6 +117,34 @@ def f(name, *values):
     return Expr("call", name, tuple(v if isinstance(v, Expr) else literal(v) for v in values))
 
 
+NATIVE_EVENT_PATHS = {
+    "event_kind": ("object_kind",), "project_id": ("project", "id"),
+    "action": ("object_attributes", "action"), "actor_id": ("user", "id"),
+    "actor_name": ("user", "name"), "url": ("object_attributes", "url"),
+    "item_id": ("object_attributes", "id"), "item_iid": ("object_attributes", "iid"),
+    "item_title": ("object_attributes", "title"),
+    "assignee_ids": ("object_attributes", "assignee_ids"),
+    "previous_assignees": ("changes", "assignees", "previous"),
+    "issue_author_id": ("issue", "author_id"), "issue_assignee_ids": ("issue", "assignee_ids"),
+    "issue_iid": ("issue", "iid"), "issue_title": ("issue", "title"),
+    "note_body": ("object_attributes", "note"), "system": ("object_attributes", "system"),
+    "noteable_type": ("object_attributes", "noteable_type"),
+}
+
+
+def event_field(key):
+    """Accept native GitLab events and the legacy flattened custom template."""
+    native = f("triggerBody")
+    for part in NATIVE_EVENT_PATHS[key]:
+        native = native[part]
+    return f("coalesce", f("triggerBody")[key], native)
+
+
+class EventFields:
+    def __getitem__(self, key):
+        return event_field(key)
+
+
 # Keep matching within one @ segment. The previous segment supplies the left
 # boundary; the username is XML data, never interpolated into the XPath query.
 MENTION_WORD = "abcdefghijklmnopqrstuvwxyz0123456789_.-/"
@@ -168,7 +196,7 @@ def has_mention(text, username):
 
 def mention_condition():
     text = f("replace", f("replace", f("toLower", f("string", f("coalesce",
-        f("triggerBody")["note_body"], ""))), "\\@", " "), "\\`", " ")
+        event_field("note_body"), ""))), "\\@", " "), "\\`", " ")
     for delimiter in CODE_DELIMITERS:
         chunks = f("xml", f("addProperty", {}, "root", f("addProperty", {}, "part", f("split", text, delimiter))))
         text = f("join", f("xpath", chunks, "/root/part[position() mod 2 = 1]/text()"), " ")
@@ -183,7 +211,7 @@ class MentionExpr(Expr):
         return mention_condition().render()
 
     def eval(self, context):
-        return has_mention(context["triggerBody"].get("note_body"), context["item"].get("username", ""))
+        return has_mention(event_field("note_body").eval(context), context["item"].get("username", ""))
 
 
 def positive_id(value):
@@ -244,7 +272,7 @@ def validate_config(raw):
 
 
 def recipient_rule(config):
-    event, member = f("triggerBody"), f("item")
+    event, member = EventFields(), f("item")
     assignees = f("coalesce", event["assignee_ids"], [])
     previous = f("body", "PreviousAssignees")
     actor_email = f("first", f("union", f("body", "Actor"), [{"email": ""}]))["email"]
@@ -270,7 +298,7 @@ def recipient_rule(config):
 
 
 def card_expression(config):
-    event = f("triggerBody")
+    event = EventFields()
     note = f("equals", event["event_kind"], "note")
     title = f("if", note, event["issue_title"], event["item_title"])
     iid = f("if", note, event["issue_iid"], event["item_iid"])
@@ -295,10 +323,10 @@ def build_actions(config):
         actions[name] = action
     add("MemberMap", {"type": "Compose", "inputs": literal(config["members"]).code()})
     add("PreviousAssignees", {"type": "Select", "inputs": {
-        "from": f("coalesce", f("triggerBody")["previous_assignees"], []).code(),
+        "from": f("coalesce", event_field("previous_assignees"), []).code(),
         "select": {"id": f("item")["id"].code()}}})
     add("Actor", {"type": "Query", "inputs": {"from": f("outputs", "MemberMap").code(),
-        "where": f("equals", f("item")["id"], f("triggerBody")["actor_id"]).code()}})
+        "where": f("equals", f("item")["id"], event_field("actor_id")).code()}})
     add("Recipients", {"type": "Query", "inputs": {"from": f("outputs", "MemberMap").code(),
         "where": recipient_rule(config).code()}})
     add("RecipientEmails", {"type": "Select", "inputs": {"from": f("body", "Recipients").code(),
@@ -330,13 +358,13 @@ def build_actions(config):
 def simulate(config, event):
     if not isinstance(event, dict):
         raise ValueError("event must be a JSON object")
-    previous = event.get("previous_assignees")
+    previous = event_field("previous_assignees").eval({"triggerBody": event})
     previous = [] if previous is None else previous
     if not isinstance(previous, list) or any(not isinstance(p, dict) for p in previous):
         raise ValueError("previous_assignees must be an array of objects or null")
     context = {"triggerBody": event, "body": {
         "PreviousAssignees": [{"id": p.get("id")} for p in previous],
-        "Actor": [m for m in config["members"] if equal(m["id"], event.get("actor_id"))]}}
+        "Actor": [m for m in config["members"] if equal(m["id"], event_field("actor_id").eval({"triggerBody": event}))]}}
     rule = recipient_rule(config)
     recipients = [m["email"] for m in config["members"] if rule.eval(dict(context, item=m))]
     return {"recipients": unique(recipients), "card": card_expression(config).eval(context),
