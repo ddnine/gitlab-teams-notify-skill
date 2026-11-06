@@ -117,6 +117,75 @@ def f(name, *values):
     return Expr("call", name, tuple(v if isinstance(v, Expr) else literal(v) for v in values))
 
 
+# Keep matching within one @ segment. The previous segment supplies the left
+# boundary; the username is XML data, never interpolated into the XPath query.
+MENTION_WORD = "abcdefghijklmnopqrstuvwxyz0123456789_.-/"
+MENTION_LEFT = MENTION_WORD + "\\@"
+MENTION_NEXT = "substring(.,string-length(../username)+1,1)"
+MENTION_AFTER_DOT = "substring(.,string-length(../username)+2,1)"
+MENTION_PREV = "preceding-sibling::part[1]"
+MENTION_XPATH = (
+    "boolean(/root/part[position()>1 and string-length(../username)>0"
+    " and ((position()=2 and string-length(" + MENTION_PREV + ")=0)"
+    " or (string-length(" + MENTION_PREV + ")>0 and not(contains('" + MENTION_LEFT
+    + "',substring(" + MENTION_PREV + ",string-length(" + MENTION_PREV + "),1)))))"
+    " and starts-with(.,../username)"
+    " and (string-length(.)=string-length(../username)"
+    " or not(contains('" + MENTION_WORD + "'," + MENTION_NEXT + "))"
+    " or (" + MENTION_NEXT + "='.' and (string-length(.)=string-length(../username)+1"
+    " or not(contains('" + MENTION_WORD + "'," + MENTION_AFTER_DOT + ")))))])"
+)
+CODE_DELIMITERS = ("```", "~~~", "``", "`")
+
+
+def mention_text(text):
+    """Conservative plain-text mentions, excluding common Markdown code forms.
+
+    This is not a full GitLab Markdown renderer; group mentions are not expanded.
+    """
+    text = as_string(text).lower().replace("\\@", " ").replace("\\`", " ")
+    for delimiter in CODE_DELIMITERS:
+        text = " ".join(text.split(delimiter)[::2])
+    return text
+
+
+def has_mention(text, username):
+    username = username.lower()
+    if not username:
+        return False
+    parts = mention_text(text).split("@")
+    for index, part in enumerate(parts[1:], 1):
+        previous = parts[index - 1]
+        left_ok = (index == 1 and not previous) or (bool(previous) and previous[-1] not in MENTION_LEFT)
+        if not left_ok or not part.startswith(username):
+            continue
+        rest = part[len(username):]
+        if (not rest or rest[0] not in MENTION_WORD
+                or (rest[0] == "." and (len(rest) == 1 or rest[1] not in MENTION_WORD))):
+            return True
+    return False
+
+
+def mention_condition():
+    text = f("replace", f("replace", f("toLower", f("string", f("coalesce",
+        f("triggerBody")["note_body"], ""))), "\\@", " "), "\\`", " ")
+    for delimiter in CODE_DELIMITERS:
+        chunks = f("xml", f("addProperty", {}, "root", f("addProperty", {}, "part", f("split", text, delimiter))))
+        text = f("join", f("xpath", chunks, "/root/part[position() mod 2 = 1]/text()"), " ")
+    document = f("xml", f("addProperty", {}, "root", f("addProperty",
+        f("addProperty", {}, "username", f("toLower", f("coalesce", f("item")["username"], ""))),
+        "part", f("split", text, "@"))))
+    return f("xpath", document, MENTION_XPATH)
+
+
+class MentionExpr(Expr):
+    def render(self):
+        return mention_condition().render()
+
+    def eval(self, context):
+        return has_mention(context["triggerBody"].get("note_body"), context["item"].get("username", ""))
+
+
 def positive_id(value):
     return type(value) is int and 0 < value <= 9007199254740991
 
@@ -160,7 +229,7 @@ def validate_config(raw):
             raise ValueError("member IDs must be positive, numeric and unique")
         seen.add(member["id"])
         if not isinstance(member["username"], str) or not member["username"].strip():
-            raise ValueError("member.username must be a nonempty maintenance label")
+            raise ValueError("member.username must be a nonempty GitLab username for mention matching")
         email = member["email"]
         if not isinstance(email, str) or not re.fullmatch(r"[A-Za-z0-9_.+\-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", email):
             raise ValueError("member.email must contain a single plain email address")
@@ -192,7 +261,7 @@ def recipient_rule(config):
         f("equals", event["system"], False),
         f("contains", ["Issue", "WorkItem"], event["noteable_type"]),
         f("or", f("contains", f("coalesce", event["issue_assignee_ids"], []), member["id"]),
-            f("equals", event["issue_author_id"], member["id"])),
+            f("equals", event["issue_author_id"], member["id"]), MentionExpr("mention", None)),
         f("not", f("equals", member["email"], actor_email)))
     project = config["project"]
     return f("and", f("equals", event["project_id"], project["id"]),

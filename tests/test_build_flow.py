@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import shutil
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +59,55 @@ class FlowTests(unittest.TestCase):
 
     def test_unknown_actor_and_unassigned_reply(self):
         self.assertEqual(self.reply(actor_id=None, issue_assignee_ids=[]), ["owner@example.com"])
+
+    def test_mentioned_non_assignee_receives_new_reply(self):
+        self.assertEqual(self.reply(issue_assignee_ids=[], note_body="Please review @example-member."),
+                         ["owner@example.com", "member@example.com"])
+        self.assertEqual(self.reply(issue_assignee_ids=[], issue_author_id=10998,
+                                   note_body="@example-member @EXAMPLE-MEMBER-ALIAS"), ["member@example.com"])
+        self.assertEqual(self.reply(issue_assignee_ids=[], issue_author_id=10998,
+                                   actor_id=10003, note_body="@example-member"), [])
+
+    def test_mentions_do_not_expand_event_scope(self):
+        for changes in ({"action": "update"}, {"system": True}, {"noteable_type": "MergeRequest"}):
+            self.assertEqual(self.reply(issue_assignee_ids=[], issue_author_id=10998,
+                                       note_body="@example-member", **changes), [])
+        self.assertEqual(self.recipients(assignee_ids=[], note_body="@example-member"), [])
+
+    def test_mention_boundaries_and_code(self):
+        cases = {
+            "@example-member": True,
+            "请看 @EXAMPLE-MEMBER，谢谢": True,
+            "(@example-member).": True,
+            "@example-member. Next": True,
+            "@example-member\nnext": True,
+            "name@example-member": False,
+            "@example-member-extra": False,
+            "@example-member.alias": False,
+            "@example-member/group": False,
+            "https://example.com/@example-member": False,
+            "\\@example-member": False,
+            "`@example-member`": False,
+            "``@example-member``": False,
+            "```python\nprint('`')\n@example-member\n```": False,
+            "~~~\n@example-member\n~~~": False,
+            "`@example-member` and @example-member": True,
+            "@unknown-person @all": False,
+            "A&B <text> \"quote\" @example-member": True,
+        }
+        for note, expected in cases.items():
+            with self.subTest(note=note):
+                self.assertEqual(flow.has_mention(note, "example-member"), expected)
+                # Exercise the exact XPath shipped to the cloud when libxml is available.
+                if shutil.which("xmllint"):
+                    root = ET.Element("root")
+                    ET.SubElement(root, "username").text = "example-member"
+                    for part in flow.mention_text(note).split("@"):
+                        ET.SubElement(root, "part").text = part
+                    result = subprocess.run(["xmllint", "--xpath", flow.MENTION_XPATH, "-"],
+                        input=ET.tostring(root), capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip() == b"true", expected)
 
     def test_irrelevant_events_are_filtered(self):
         for change in ({"system": True}, {"system": "false"}, {"action": "update"},

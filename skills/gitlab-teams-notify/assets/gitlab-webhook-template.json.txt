@@ -15,6 +15,7 @@
   "issue_assignee_ids": {{issue.assignee_ids}},
   "issue_iid": {{issue.iid}},
   "issue_title": "{{issue.title}}",
+  "note_body": "{{object_attributes.note}}",
   "system": {{object_attributes.system}},
   "noteable_type": "{{object_attributes.noteable_type}}"
 }
