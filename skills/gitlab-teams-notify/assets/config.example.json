@@ -1,0 +1,15 @@
+{
+  "project": {
+    "id": 12345,
+    "gitlab_url": "https://gitlab.example.com",
+    "path": "demo/example-project",
+    "display_name": "Example project"
+  },
+  "members": [
+    {"id": 10001, "username": "example-owner", "email": "owner@example.com"},
+    {"id": 10002, "username": "example-member", "email": "member@example.com"},
+    {"id": 10003, "username": "example-member-alias", "email": "member@example.com"}
+  ],
+  "teams_connection_reference": "shared_teams",
+  "flow_management_url": "https://make.powerautomate.com/environments/EXAMPLE/flows/EXAMPLE/details"
+}
