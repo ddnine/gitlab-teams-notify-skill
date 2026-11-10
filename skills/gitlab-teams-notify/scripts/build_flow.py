@@ -129,6 +129,9 @@ NATIVE_EVENT_PATHS = {
     "issue_iid": ("issue", "iid"), "issue_title": ("issue", "title"),
     "note_body": ("object_attributes", "note"), "system": ("object_attributes", "system"),
     "noteable_type": ("object_attributes", "noteable_type"),
+    "reviewer_ids": ("object_attributes", "reviewer_ids"),
+    "previous_reviewer_ids": ("changes", "reviewer_ids", "previous"),
+    "previous_reviewers": ("changes", "reviewers", "previous"),
 }
 
 
@@ -214,6 +217,22 @@ class MentionExpr(Expr):
         return has_mention(event_field("note_body").eval(context), context["item"].get("username", ""))
 
 
+PREVIOUS_REVIEWER_XPATH = "boolean(/root/reviewer/id = /root/id)"
+
+
+class PreviousReviewerExpr(Expr):
+    def render(self):
+        previous, member_id = self.args
+        data = f("addProperty", f("addProperty", {}, "id", member_id), "reviewer", previous)
+        document = f("xml", f("addProperty", {}, "root", data))
+        return f("xpath", document, PREVIOUS_REVIEWER_XPATH).render()
+
+    def eval(self, context):
+        previous, member_id = (arg.eval(context) for arg in self.args)
+        return any(isinstance(reviewer, dict) and as_string(reviewer.get("id")) == as_string(member_id)
+                   for reviewer in previous)
+
+
 def positive_id(value):
     return type(value) is int and 0 < value <= 9007199254740991
 
@@ -231,8 +250,11 @@ def https_url(value):
 def validate_config(raw):
     config = copy.deepcopy(raw)
     required = {"project", "members", "teams_connection_reference", "flow_management_url"}
-    if not isinstance(config, dict) or set(config) != required:
-        raise ValueError("config must contain exactly the documented fields")
+    allowed = required | {"notify_mr_reviewers"}
+    if not isinstance(config, dict) or not required <= config.keys() <= allowed:
+        raise ValueError("config must contain the required fields and only documented optional fields")
+    if type(config.get("notify_mr_reviewers", False)) is not bool:
+        raise ValueError("notify_mr_reviewers must be a boolean")
     project = config["project"]
     if not isinstance(project, dict) or set(project) != {"id", "gitlab_url", "path", "display_name"}:
         raise ValueError("project fields do not match the example schema")
@@ -271,6 +293,22 @@ def validate_config(raw):
     return config
 
 
+def reviewer_rule(event, member_id):
+    current_ids = f("coalesce", event["reviewer_ids"], [])
+    previous_ids = event["previous_reviewer_ids"]
+    previous_reviewers = event["previous_reviewers"]
+    was_reviewer = PreviousReviewerExpr("previous_reviewer", None,
+        (f("coalesce", previous_reviewers, []), member_id))
+    return f("and",
+        f("equals", event["event_kind"], "merge_request"),
+        f("contains", current_ids, member_id),
+        f("or", f("equals", event["action"], "open"), f("and",
+            f("equals", event["action"], "update"),
+            f("not", f("equals", f("coalesce", previous_ids, previous_reviewers), None)),
+            f("not", f("contains", f("coalesce", previous_ids, []), member_id)),
+            f("not", was_reviewer))))
+
+
 def recipient_rule(config):
     event, member = EventFields(), f("item")
     assignees = f("coalesce", event["assignee_ids"], [])
@@ -291,10 +329,13 @@ def recipient_rule(config):
         f("or", f("contains", f("coalesce", event["issue_assignee_ids"], []), member["id"]),
             f("equals", event["issue_author_id"], member["id"]), MentionExpr("mention", None)),
         f("not", f("equals", member["email"], actor_email)))
+    routes = [assigned, replied]
+    if config.get("notify_mr_reviewers", False):
+        routes.append(reviewer_rule(event, member["id"]))
     project = config["project"]
     return f("and", f("equals", event["project_id"], project["id"]),
         f("startsWith", f("coalesce", event["url"], ""), project["gitlab_url"] + "/" + project["path"] + "/"),
-        f("or", assigned, replied))
+        f("or", *routes))
 
 
 def card_expression(config):
@@ -302,18 +343,27 @@ def card_expression(config):
     note = f("equals", event["event_kind"], "note")
     title = f("if", note, event["issue_title"], event["item_title"])
     iid = f("if", note, event["issue_iid"], event["item_iid"])
+    project_name = config["project"]["display_name"]
+    heading = f("if", note, "GitLab 工作项有新回复", "GitLab 工作项分配提醒")
+    reference = f("concat", project_name, " #", f("string", iid))
+    action = f("setProperty", {"type": "Action.OpenUrl", "title": "打开工作项"}, "url", event["url"])
+    if config.get("notify_mr_reviewers", False):
+        merge_request = f("equals", event["event_kind"], "merge_request")
+        heading = f("if", merge_request, "GitLab MR 评审提醒", heading)
+        reference = f("if", merge_request, f("concat", project_name, " !", f("string", iid)), reference)
+        action = f("if", merge_request,
+            f("setProperty", {"type": "Action.OpenUrl", "title": "查看 MR"}, "url", event["url"]), action)
     def rich(text):
         return f("setProperty", {"type": "RichTextBlock"}, "inlines", f("createArray",
             f("setProperty", {"type": "TextRun"}, "text", f("string", text))))
     body = f("createArray",
         f("setProperty", {"type": "TextBlock", "weight": "Bolder", "size": "Medium", "wrap": True},
-            "text", f("if", note, "GitLab 工作项有新回复", "GitLab 工作项分配提醒")),
+            "text", heading),
         rich(f("take", f("string", title), 1000)),
-        rich(f("concat", config["project"]["display_name"], " #", f("string", iid))),
+        rich(reference),
         rich(f("concat", "操作人：", f("take", f("string", event["actor_name"]), 120))))
     card = f("setProperty", {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "version": "1.2"}, "body", body)
-    return f("setProperty", card, "actions", f("createArray",
-        f("setProperty", {"type": "Action.OpenUrl", "title": "打开工作项"}, "url", event["url"])))
+    return f("setProperty", card, "actions", f("createArray", action))
 
 
 def build_actions(config):

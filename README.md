@@ -1,6 +1,6 @@
 # GitLab Teams Notify Skill
 
-通过 GitLab 项目 Webhook 和 Power Automate，把工作项分配、新回复发送到对应人员的 Teams 私聊。包含配置流程、离线生成器、收件人模拟器和发布前隐私检查。
+通过 GitLab 项目 Webhook 和 Power Automate，把工作项分配、新回复及可选的 MR Reviewer 分配提醒发送到对应人员的 Teams 私聊。包含配置流程、离线生成器、收件人模拟器和发布前隐私检查。
 
 仓库只包含通用代码与虚构示例。项目地址、成员映射、凭据、Webhook URL 和运行记录应保存在仓库外。
 
@@ -15,6 +15,8 @@ Skill 会检查现有项目和流程，确认成员的数字用户 ID，生成�
 默认规则：新建且有负责人时通知负责人；重新分配时只通知新增负责人；新回复通知当前负责人、创建者和正文中 `@用户名` 的已映射用户，排除发言者并按 Teams 邮箱去重。未分配的新事项等待分配后再通知。规则可以按项目需求调整。
 
 `@` 提醒只覆盖新发表的回复，不覆盖事项描述、编辑回复、群组或 `@all`。用户名匹配不区分大小写，避开相似用户名、邮箱及常见 Markdown 代码片段；它不是完整的 GitLab Markdown 解析器。回复正文仅用于流程内识别收件人，通知卡片仍只包含事项摘要和链接。
+
+将 `notify_mr_reviewers` 设为 `true` 可启用 MR Reviewer 提醒。新建 MR 通知已指定的 Reviewer，更新只通知新增的 Reviewer，卡片直接链接到 MR。配置步骤见 [MR Reviewer 提醒](skills/gitlab-teams-notify/references/power-automate.md#mr-reviewer-提醒)。
 
 默认接收标准 GitLab Webhook 负载，并兼容旧扁平字段。不要用自定义模板承载长回复：某些版本的模板渲染结果上限仅 4 KB，会导致通知在 GitLab 内被拒绝。迁移步骤和数据范围见 skill 的云端配置说明。
 

@@ -53,6 +53,12 @@ Compose 在部分中文界面显示为“编辑”。先用动作类别或英文
 
 回复正文会进入现有 Power Automate 运行记录，用于收件人判断；默认卡片不包含正文。原生与旧格式都没有正文时按空文本处理，保留原有负责人和创建者通知。迁移现有流程时同步更新 PreviousAssignees、Actor、Recipients 和 PostCard 的字段解析，保留其他卡片定制和连接。
 
+## MR Reviewer 提醒
+
+`notify_mr_reviewers` 默认关闭。项目需要这条规则时，设为 `true` 并重新生成配置。先核对目标 GitLab 版本的标准事件格式，再将生成的 Reviewer 条件合入现有 `Recipients`，将 MR 标题、`!iid` 和「查看 MR」按钮合入 `PostCard`。保留现有工作项卡片定制、Teams 连接和 `MemberMap`。保存并验证流程后，在现有 GitLab Webhook 勾选 **Merge request events**，使用标准事件负载。[GitLab MR 事件字段](https://docs.gitlab.com/user/project/integrations/webhook_events/#merge-request-events)
+
+处理 `object_kind=merge_request`。新建时用 `object_attributes.reviewer_ids` 匹配已映射的 Reviewer。更新时要求 `changes.reviewers.previous` 或 `changes.reviewer_ids.previous` 提供旧名单，再按数字用户 ID 比较。明确的空名单表示此前没有 Reviewer，缺少旧名单则跳过更新。移除 Reviewer、重新请求同一人评审和只改评审状态均不提醒。卡片用 `object_attributes.url`，沿用项目 ID 和 URL 范围校验以及 Teams 邮箱去重。
+
 ## 验收与维护
 
 按 [validation.md](validation.md) 先做离线路由测试，再在仅发给操作者的测试范围验证云端卡片与故障路径。入口 202 不代表 Teams 已发送成功。

@@ -1,4 +1,4 @@
 interface:
   display_name: "GitLab Teams 通知"
-  short_description: "为 GitLab 项目配置 Teams 工作项通知、统一成员映射和失败告警"
+  short_description: "为 GitLab 项目配置工作项和 MR Reviewer 的 Teams 私聊提醒及故障告警"
   default_prompt: "使用 $gitlab-teams-notify 为我指定的 GitLab 项目配置 Teams 工作项通知。"

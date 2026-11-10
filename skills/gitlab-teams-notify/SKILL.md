@@ -1,6 +1,6 @@
 ---
 name: gitlab-teams-notify
-description: 为 GitLab 项目创建、迁移或维护 Teams 工作项私聊通知，包含分配、新回复与个人 @ 提醒、Webhook、Power Automate 收件人路由、统一成员映射、用户 ID 比较和失败告警。适用于项目通知接入与排障，不用于普通 GitLab 开发或批量发送 Teams 消息。
+description: 为 GitLab 项目创建、迁移或维护 Teams 私聊通知，覆盖工作项分配、新回复、个人 @ 和 MR Reviewer 分配。使用 GitLab Webhook、Power Automate 和统一成员映射，适用于通知接入与排障，不用于普通 GitLab 开发或批量发送 Teams 消息。
 ---
 
 # GitLab → Teams 项目通知
@@ -12,6 +12,7 @@ description: 为 GitLab 项目创建、迁移或维护 Teams 工作项私聊通�
 - 从当前项目获取数字项目 ID、项目 URL 和用户数字 ID。Maintainer 通常可以管理项目 Webhook，但 Power Automate 连接、许可证和租户策略仍需分别检查。
 - 使用用户提供或确认的 GitLab ID → Teams 邮箱映射。分配、创建者和操作人比较使用数字 ID；用户名用于解析正文中的个人 @，改名后需维护映射。不要从姓名相似度猜测邮箱。支持多个 ID 对应同一 Teams 账号。
 - 没有既定规则时，建议：新事项通知负责人；改派只通知新增负责人；新回复通知当前负责人、创建者及正文中 @ 的已映射用户，排除发言者；按邮箱去重；未分配事项等待分配后通知。@ 提醒只覆盖新发表的回复，不扩大到描述或编辑事件。
+- 用户要求 MR Reviewer 提醒时，将私有配置中的 `notify_mr_reviewers` 设为 `true`。新建 MR 通知已指定的 Reviewer，更新只通知新增 Reviewer ID。沿用成员映射和 Teams 私聊，卡片带 MR 链接。接入步骤见 [MR Reviewer 提醒](references/power-automate.md#mr-reviewer-提醒)。
 - 确认事件类型、机密事项范围和故障告警对象。模板的告警动作发送给 Teams 连接所有者，不要假定它就是项目负责人。
 
 ## 配置与验证

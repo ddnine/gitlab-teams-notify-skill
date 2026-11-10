@@ -11,5 +11,6 @@
     {"id": 10003, "username": "example-member-alias", "email": "member@example.com"}
   ],
   "teams_connection_reference": "shared_teams",
-  "flow_management_url": "https://make.powerautomate.com/environments/EXAMPLE/flows/EXAMPLE/details"
+  "flow_management_url": "https://make.powerautomate.com/environments/EXAMPLE/flows/EXAMPLE/details",
+  "notify_mr_reviewers": false
 }

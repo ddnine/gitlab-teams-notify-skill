@@ -33,6 +33,21 @@ class FlowTests(unittest.TestCase):
         event.update(changes)
         return self.recipients(**event)
 
+    def merge_request(self, reviewer_ids, action="open", changes=None):
+        return {
+            "object_kind": "merge_request",
+            "project": {"id": 12345},
+            "user": {"id": 10001, "name": "Example actor"},
+            "object_attributes": {
+                "action": action,
+                "iid": 7,
+                "title": 'Review "example"',
+                "url": "https://gitlab.example.com/demo/example-project/-/merge_requests/7",
+                "reviewer_ids": reviewer_ids,
+            },
+            "changes": changes or {},
+        }
+
     def test_new_assignment_and_unassigned(self):
         self.assertEqual(self.recipients(), ["owner@example.com"])
         self.assertEqual(self.recipients(assignee_ids=[]), [])
@@ -139,6 +154,51 @@ class FlowTests(unittest.TestCase):
     def test_work_item_event_variants(self):
         self.assertEqual(self.recipients(event_kind="work_item"), ["owner@example.com"])
         self.assertEqual(self.reply(noteable_type="WorkItem"), ["owner@example.com", "member@example.com"])
+
+    def test_mr_reviewer_notifications_are_opt_in(self):
+        event = self.merge_request([10001])
+        self.assertEqual(flow.simulate(self.config, event)["recipients"], [])
+        legacy_config = self.config.copy()
+        legacy_config.pop("notify_mr_reviewers")
+        self.assertEqual(flow.simulate(flow.validate_config(legacy_config), event)["recipients"], [])
+        with self.assertRaises(ValueError):
+            flow.validate_config(dict(self.config, notify_mr_reviewers="true"))
+
+    def test_new_mr_uses_mapped_reviewers_and_links_to_mr(self):
+        self.config["notify_mr_reviewers"] = True
+        event = self.merge_request([10001, 10002, 10003, 10999])
+        result = flow.simulate(self.config, event)
+        self.assertEqual(result["recipients"], ["owner@example.com", "member@example.com"])
+        card = result["card"]
+        self.assertEqual(card["body"][1]["inlines"][0]["text"], event["object_attributes"]["title"])
+        self.assertEqual(card["body"][2]["inlines"][0]["text"], "Example project !7")
+        self.assertEqual(card["actions"][0], {"type": "Action.OpenUrl", "title": "查看 MR",
+                                             "url": event["object_attributes"]["url"]})
+        self.assertEqual(flow.simulate(self.config, self.merge_request([]))["recipients"], [])
+        event["project"]["id"] = 54321
+        self.assertEqual(flow.simulate(self.config, event)["recipients"], [])
+        self.assertEqual(self.recipients(), ["owner@example.com"])
+
+    def test_mr_updates_only_notify_new_reviewer_ids(self):
+        self.config["notify_mr_reviewers"] = True
+        cases = [
+            ("append", "update", [10001, 10002], {"reviewers": {"previous": [{"id": 10001}]}},
+             ["member@example.com"]),
+            ("numeric history", "update", [10001, 10002], {"reviewer_ids": {"previous": [10002]}},
+             ["owner@example.com"]),
+            ("first reviewer", "update", [10002], {"reviewers": {"previous": []}}, ["member@example.com"]),
+            ("re-request", "update", [10001], {"reviewers": {
+                "previous": [{"id": 10001, "state": "approved"}],
+                "current": [{"id": 10001, "state": "unreviewed", "re_requested": True}],
+            }}, []),
+            ("remove", "update", [10001], {"reviewer_ids": {"previous": [10001, 10002]}}, []),
+            ("no history", "update", [10001], {"title": {"previous": "Old title"}}, []),
+            ("reopen", "reopen", [10001], {"reviewers": {"previous": []}}, []),
+        ]
+        for scenario, action, reviewers, changes, expected in cases:
+            with self.subTest(scenario=scenario):
+                event = self.merge_request(reviewers, action, changes)
+                self.assertEqual(flow.simulate(self.config, event)["recipients"], expected)
 
     def test_title_is_data_and_reply_uses_issue_iid(self):
         title = 'Quote " slash \\ newline\n@{triggerBody()} <b>literal</b>'
