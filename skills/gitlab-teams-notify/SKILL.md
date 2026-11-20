@@ -33,7 +33,9 @@ description: 为 GitLab 项目创建、迁移或维护 Teams 私聊通知，覆�
 - @ 收件人从同一 MemberMap 解析，不要求同时是负责人。只匹配个人完整用户名，不展开群组或 @all；保留新回复、非系统备注及事项类型限制。正文作为 XML 数据传入静态 XPath，不将用户输入拼入 XPath 代码。常见代码片段会被跳过，但不承诺与完整 GitLab Markdown 渲染完全一致。
 - 构建卡片使用 JSON 对象函数，不能把标题或操作人直接拼入 JSON 字面量。只发送必要的标题、编号、操作人和链接，不默认发送回复正文或附件。
 - `FailureAlert` 只在发送循环 Failed、TimedOut 或 Skipped 时执行；`MarkFailed` 仅在告警成功后执行并把本次运行标为失败。正常发送和零收件人不能触发故障告警。
-- 项目 ID 和 URL 过滤只控制路由，不证明请求来自 GitLab；静态成员表也不是实时权限校验。
+- `WebhookSecret` 与 `VerifySource` 位于 `MemberMap` 之前；令牌不匹配、仍为占位符或过短时以 Failed 终止，不发送任何卡片。密钥只填在流程界面（启用安全输入，Compose 会自动保护输出）和 GitLab Webhook 中。
+- 每个允许的项目同时匹配项目 ID、URL 前缀和该项目的 `member_ids`；收件人必须属于事件所在项目。`member_ids` 由 `sync_members.py` 刷新，是快照而不是实时权限校验。
+- 项目 ID 和 URL 过滤只控制路由，来源由 Secret token 校验；静态成员表也不是实时权限校验。
 
 ## 维护与发布
 

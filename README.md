@@ -39,6 +39,18 @@ python3 skills/gitlab-teams-notify/scripts/audit_package.py .
 
 发布前可增加 `--deny-file /absolute/private/deny-terms.txt`，逐行列出本次实际账号、姓名、域名和标识；该文件也不能提交。`--staged` 检查 Git 索引中将要提交的内容。扫描只是辅助，还应审查文件清单、提交身份和历史。
 
+## 多项目与来源校验
+
+旧版单项目配置（`project` 字段）仍可使用，会自动视为所有已映射成员都属于该项目。一个流程可服务同一 GitLab 实例的多个项目：`gitlab_url` 为实例地址，`projects` 列出允许的项目 ID、路径、显示名和 `member_ids`。收件人必须属于事件所在项目的 `member_ids`，因此被 @ 的非项目成员和已退出的创建者不会收到卡片。用 `sync_members.py` 刷新成员（只读 `glab api`，仅保留 Planner 及以上、未过期的活跃成员）：
+
+```sh
+python3 skills/gitlab-teams-notify/scripts/sync_members.py --config /absolute/private/config.json
+python3 skills/gitlab-teams-notify/scripts/sync_members.py --config /absolute/private/config.json --write
+python3 skills/gitlab-teams-notify/scripts/sync_members.py --config /absolute/private/config.json --template /absolute/private/dir
+```
+
+每个 GitLab Webhook 都设置 Secret token。流程开头的 `WebhookSecret`（启用安全输入，Compose 会自动保护输出）保存同一密钥，`VerifySource` 在 `X-Gitlab-Token` 不匹配、仍是占位符或少于 32 个字符时直接以 Failed 结束，不发送任何通知。密钥只在流程界面和 GitLab 设置中填写，不进入配置或生成文件。
+
 ## 边界
 
 默认模板包含统一成员映射、用户 ID 比较及现有 Teams 连接的失败告警。静态映射不能证明收件人当前仍有事项访问权限；Teams 连接本身失效时，使用同一连接的告警也可能失败。运行时权限校验、独立告警和跨运行去重需要额外设计，见 skill 的参考文档。

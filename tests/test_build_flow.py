@@ -218,12 +218,17 @@ class FlowTests(unittest.TestCase):
         raw = copy.deepcopy(self.config)
         raw["members"][0]["email"] = "OWNER@EXAMPLE.COM"
         self.assertEqual(flow.validate_config(raw)["members"][0]["email"], "owner@example.com")
-        for field, value in (("id", True), ("id", "12345"), ("path", "demo/../project"),
-                             ("gitlab_url", "http://gitlab.example.com"),
-                             ("gitlab_url", "https://name:password@gitlab.example.com")):
+        for field, value in (("id", True), ("id", "12345"), ("id", 12346), ("path", "demo/../project"),
+                             ("member_ids", [10001, 10001]), ("member_ids", ["10001"]), ("member_ids", None)):
             raw = copy.deepcopy(self.config)
-            raw["project"][field] = value
+            raw["projects"][0][field] = value
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                flow.validate_config(raw)
+        for value in ("http://gitlab.example.com", "https://name:password@gitlab.example.com"):
+            with self.subTest(gitlab_url=value), self.assertRaises(ValueError):
+                flow.validate_config(dict(self.config, gitlab_url=value))
+        for raw in (dict(self.config, projects=[]), {"project": self.config["projects"][0], **self.config}):
+            with self.assertRaises(ValueError):
                 flow.validate_config(raw)
         raw = copy.deepcopy(self.config)
         raw["members"].append(copy.deepcopy(raw["members"][0]))
@@ -241,6 +246,77 @@ class FlowTests(unittest.TestCase):
         for status in ("Succeeded", "Failed", "TimedOut", "Skipped"):
             should_alert = status in actions["FailureAlert"]["runAfter"]["SendNotifications"]
             self.assertEqual(should_alert, status != "Succeeded")
+
+    def second_project(self, **changes):
+        return dict(self.event, project_id=12346, url="https://gitlab.example.com/demo/second-project/-/issues/1",
+                    **changes)
+
+    def test_recipients_must_be_members_of_the_event_project(self):
+        self.assertEqual(flow.simulate(self.config, self.second_project(assignee_ids=[10001, 10002]))["recipients"],
+                         ["owner@example.com"])
+        reply = self.second_project(event_kind="note", action="create", system=False, noteable_type="Issue",
+            actor_id=10999, issue_author_id=10998, issue_assignee_ids=[], note_body="@example-owner @example-member")
+        self.assertEqual(flow.simulate(self.config, reply)["recipients"], ["owner@example.com"])
+        self.config["projects"][1]["member_ids"] = []
+        self.assertEqual(flow.simulate(self.config, reply)["recipients"], [])
+
+    def test_project_id_and_url_must_name_the_same_project(self):
+        for changes in ({"project_id": 12346}, {"url": "https://gitlab.example.com/demo/second-project/-/issues/1"}):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.recipients(**changes), [])
+
+    def test_legacy_single_project_config_is_upgraded(self):
+        legacy = {key: copy.deepcopy(value) for key, value in self.config.items() if key not in ("gitlab_url", "projects")}
+        legacy["project"] = {"id": 12345, "gitlab_url": "https://gitlab.example.com/", "path": "demo/example-project",
+                             "display_name": "Example project"}
+        config = flow.validate_config(legacy)
+        self.assertEqual((config["gitlab_url"], config["projects"]), ("https://gitlab.example.com", [
+            {"id": 12345, "path": "demo/example-project", "display_name": "Example project",
+             "member_ids": [10001, 10002, 10003]}]))
+        self.assertEqual(flow.simulate(config, self.event)["recipients"], ["owner@example.com"])
+        self.assertEqual(flow.simulate(config, dict(self.event, assignee_ids=[10002]))["recipients"],
+                         ["member@example.com"])
+        legacy["members"].append(copy.deepcopy(legacy["members"][0]))
+        with self.assertRaises(ValueError):
+            flow.validate_config(legacy)
+
+    def test_single_project_config_renders(self):
+        self.config["projects"] = self.config["projects"][:1]
+        self.assertTrue(flow.recipient_rule(self.config).code().startswith("@and(and(equals("))
+        self.assertEqual(self.recipients(), ["owner@example.com"])
+
+    def test_card_uses_event_project_label(self):
+        card = flow.simulate(self.config, self.second_project(item_iid=3))["card"]
+        self.assertEqual(card["body"][2]["inlines"][0]["text"], "Second project #3")
+        card = flow.simulate(self.config, dict(self.event, project_id=None))["card"]
+        self.assertEqual(card["body"][2]["inlines"][0]["text"], "GitLab #1")
+
+    def test_source_check_fails_closed(self):
+        secret = "s" * flow.SECRET_MIN_LENGTH
+        cases = [
+            ({"X-Gitlab-Token": secret}, secret, True),
+            ({"X-Gitlab-Token": secret + "x"}, secret, False),
+            ({}, secret, False),
+            ({"X-Gitlab-Token": None}, secret, False),
+            ({"X-Gitlab-Token": flow.SECRET_PLACEHOLDER}, flow.SECRET_PLACEHOLDER, False),
+            ({"X-Gitlab-Token": "short"}, "short", False),
+            ({"X-Gitlab-Token": ""}, "", False),
+        ]
+        for headers, configured, expected in cases:
+            with self.subTest(headers=headers, configured=configured):
+                self.assertEqual(flow.verify_source(headers, configured), expected)
+
+    def test_source_gate_runs_before_member_map(self):
+        actions = flow.build_actions(self.config)
+        self.assertEqual(list(actions)[:3], ["WebhookSecret", "VerifySource", "MemberMap"])
+        self.assertEqual(actions["WebhookSecret"]["inputs"], flow.SECRET_PLACEHOLDER)
+        self.assertEqual(actions["WebhookSecret"]["runtimeConfiguration"]["secureData"]["properties"],
+                         ["inputs"])
+        self.assertEqual(actions["VerifySource"]["expression"], flow.f("not", flow.source_check()).code())
+        reject = actions["VerifySource"]["actions"]["RejectUnverifiedRequest"]
+        self.assertEqual((reject["type"], reject["inputs"]["runStatus"]), ("Terminate", "Failed"))
+        self.assertEqual(actions["VerifySource"]["else"], {"actions": {}})
+        self.assertEqual(actions["MemberMap"]["runAfter"], {"VerifySource": ["Succeeded"]})
 
     def test_expression_literal_escaping(self):
         self.assertEqual(flow.literal("it's safe").render(), "'it''s safe'")
