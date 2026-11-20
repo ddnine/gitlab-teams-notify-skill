@@ -13,5 +13,6 @@
   ],
   "teams_connection_reference": "shared_teams",
   "flow_management_url": "https://make.powerautomate.com/environments/EXAMPLE/flows/EXAMPLE/details",
-  "notify_mr_reviewers": false
+  "notify_mr_reviewers": false,
+  "notify_mr_comments": false
 }

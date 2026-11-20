@@ -146,6 +146,10 @@ NATIVE_EVENT_PATHS = {
     "reviewer_ids": ("object_attributes", "reviewer_ids"),
     "previous_reviewer_ids": ("changes", "reviewer_ids", "previous"),
     "previous_reviewers": ("changes", "reviewers", "previous"),
+    # Comment events on merge requests carry the MR under merge_request, including reviewer_ids.
+    "mr_author_id": ("merge_request", "author_id"), "mr_assignee_ids": ("merge_request", "assignee_ids"),
+    "mr_reviewer_ids": ("merge_request", "reviewer_ids"), "mr_iid": ("merge_request", "iid"),
+    "mr_title": ("merge_request", "title"),
 }
 
 
@@ -299,11 +303,12 @@ def validate_config(raw):
     if isinstance(config, dict) and "project" in config:
         config = upgrade_legacy_config(config)
     required = {"gitlab_url", "projects", "members", "teams_connection_reference", "flow_management_url"}
-    allowed = required | {"notify_mr_reviewers"}
+    allowed = required | {"notify_mr_reviewers", "notify_mr_comments"}
     if not isinstance(config, dict) or not required <= config.keys() <= allowed:
         raise ValueError("config must contain the required fields and only documented optional fields")
-    if type(config.get("notify_mr_reviewers", False)) is not bool:
-        raise ValueError("notify_mr_reviewers must be a boolean")
+    for flag in ("notify_mr_reviewers", "notify_mr_comments"):
+        if type(config.get(flag, False)) is not bool:
+            raise ValueError(f"{flag} must be a boolean")
     config["gitlab_url"] = https_url(config["gitlab_url"])
     projects = config["projects"]
     if not isinstance(projects, list) or not projects:
@@ -364,17 +369,24 @@ def recipient_rule(config):
             f("equals", event["action"], "update"),
             f("not", f("equals", event["previous_assignees"], None)),
             f("not", f("contains", previous, f("addProperty", {}, "id", member["id"]))))))
-    replied = f("and",
-        f("equals", event["event_kind"], "note"),
-        f("equals", event["action"], "create"),
-        f("equals", event["system"], False),
-        f("contains", ["Issue", "WorkItem"], event["noteable_type"]),
-        f("or", f("contains", f("coalesce", event["issue_assignee_ids"], []), member["id"]),
-            f("equals", event["issue_author_id"], member["id"]), MentionExpr("mention", None)),
-        f("not", f("equals", member["email"], actor_email)))
-    routes = [assigned, replied]
+    def replied(noteable_types, *related):
+        return f("and",
+            f("equals", event["event_kind"], "note"),
+            f("equals", event["action"], "create"),
+            f("equals", event["system"], False),
+            f("contains", noteable_types, event["noteable_type"]),
+            f("or", *related, MentionExpr("mention", None)),
+            f("not", f("equals", member["email"], actor_email)))
+    routes = [assigned, replied(["Issue", "WorkItem"],
+        f("contains", f("coalesce", event["issue_assignee_ids"], []), member["id"]),
+        f("equals", event["issue_author_id"], member["id"]))]
     if config.get("notify_mr_reviewers", False):
         routes.append(reviewer_rule(event, member["id"]))
+    if config.get("notify_mr_comments", False):
+        routes.append(replied(["MergeRequest"],
+            f("contains", f("coalesce", event["mr_reviewer_ids"], []), member["id"]),
+            f("contains", f("coalesce", event["mr_assignee_ids"], []), member["id"]),
+            f("equals", event["mr_author_id"], member["id"])))
     return f("and", project_scope(config), f("or", *routes))
 
 
@@ -421,15 +433,22 @@ def card_expression(config):
     note = f("equals", event["event_kind"], "note")
     title = f("if", note, event["issue_title"], event["item_title"])
     iid = f("if", note, event["issue_iid"], event["item_iid"])
+    mr_cards = []
+    if config.get("notify_mr_reviewers", False):
+        mr_cards.append((f("equals", event["event_kind"], "merge_request"), "GitLab MR 评审提醒"))
+    if config.get("notify_mr_comments", False):
+        mr_note = f("and", note, f("equals", event["noteable_type"], "MergeRequest"))
+        title = f("if", mr_note, event["mr_title"], title)
+        iid = f("if", mr_note, event["mr_iid"], iid)
+        mr_cards.append((mr_note, "GitLab MR 有新回复"))
     project_name = project_label(config)
     heading = f("if", note, "GitLab 工作项有新回复", "GitLab 工作项分配提醒")
     reference = f("concat", project_name, " #", f("string", iid))
     action = f("setProperty", {"type": "Action.OpenUrl", "title": "打开工作项"}, "url", event["url"])
-    if config.get("notify_mr_reviewers", False):
-        merge_request = f("equals", event["event_kind"], "merge_request")
-        heading = f("if", merge_request, "GitLab MR 评审提醒", heading)
-        reference = f("if", merge_request, f("concat", project_name, " !", f("string", iid)), reference)
-        action = f("if", merge_request,
+    for is_mr, mr_heading in mr_cards:
+        heading = f("if", is_mr, mr_heading, heading)
+        reference = f("if", is_mr, f("concat", project_name, " !", f("string", iid)), reference)
+        action = f("if", is_mr,
             f("setProperty", {"type": "Action.OpenUrl", "title": "查看 MR"}, "url", event["url"]), action)
     def rich(text):
         return f("setProperty", {"type": "RichTextBlock"}, "inlines", f("createArray",

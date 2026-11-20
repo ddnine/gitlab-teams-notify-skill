@@ -18,6 +18,8 @@ Skill 会检查现有项目和流程，确认成员的数字用户 ID，生成�
 
 将 `notify_mr_reviewers` 设为 `true` 可启用 MR Reviewer 提醒。新建 MR 通知已指定的 Reviewer，更新只通知新增的 Reviewer，卡片直接链接到 MR。配置步骤见 [MR Reviewer 提醒](skills/gitlab-teams-notify/references/power-automate.md#mr-reviewer-提醒)。
 
+将 `notify_mr_comments` 设为 `true` 可启用 MR 新回复提醒：MR 上新发表的非系统评论通知该 MR 的 Reviewer、负责人、作者和正文中 @ 的已映射用户，排除发言者，卡片链接到该条评论。见 [MR 新回复](skills/gitlab-teams-notify/references/power-automate.md#mr-新回复)。
+
 默认接收标准 GitLab Webhook 负载，并兼容旧扁平字段。不要用自定义模板承载长回复：某些版本的模板渲染结果上限仅 4 KB，会导致通知在 GitLab 内被拒绝。迁移步骤和数据范围见 skill 的云端配置说明。
 
 ## 离线生成
