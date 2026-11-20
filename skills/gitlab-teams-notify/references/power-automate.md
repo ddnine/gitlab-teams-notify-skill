@@ -62,6 +62,12 @@ Compose 在部分中文界面显示为“编辑”。先用动作类别或英文
 
 处理 `object_kind=merge_request`。新建时用 `object_attributes.reviewer_ids` 匹配已映射的 Reviewer。更新时要求 `changes.reviewers.previous` 或 `changes.reviewer_ids.previous` 提供旧名单，再按数字用户 ID 比较。明确的空名单表示此前没有 Reviewer，缺少旧名单则跳过更新。移除 Reviewer、重新请求同一人评审和只改评审状态均不提醒。卡片用 `object_attributes.url`，沿用项目 ID 和 URL 范围校验以及 Teams 邮箱去重。
 
+## MR 新回复
+
+`notify_mr_comments` 默认关闭；关闭时生成结果与未加入此功能前完全相同。启用后重新生成，合入新的 `Recipients` 条件和 `PostCard` 卡片表达式；Webhook 已勾选 Comments 时无需新增事件。
+
+仅处理 `object_kind=note`、`action=create`、`system=false` 且 `noteable_type=MergeRequest` 的事件。收件人来自同一事件中的 `merge_request.reviewer_ids`、`merge_request.assignee_ids`、`merge_request.author_id` 以及正文中 @ 的已映射用户，排除发言者的所有别名，并受项目 `member_ids` 限制。已在 GitLab 19.5 的真实 MR 评论负载中确认 `merge_request` 包含 `reviewer_ids`；官方示例未列出该字段，升级 GitLab 后应重新核对。卡片标题为「GitLab MR 有新回复」，使用 `merge_request.title` 与 `!iid`，按钮链接到 `object_attributes.url`（即该条评论）。编辑评论、系统备注（如请求评审、推送提交）不提醒。
+
 ## 验收与维护
 
 按 [validation.md](validation.md) 先做离线路由测试，再在仅发给操作者的测试范围验证云端卡片与故障路径。入口 202 不代表 Teams 已发送成功。

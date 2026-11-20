@@ -200,6 +200,63 @@ class FlowTests(unittest.TestCase):
                 event = self.merge_request(reviewers, action, changes)
                 self.assertEqual(flow.simulate(self.config, event)["recipients"], expected)
 
+    def mr_comment(self, actor_id=10999, note="Looks good", project=None, **merge_request):
+        """Shaped like a real GitLab 19 comment event on a merge request."""
+        project = project or {"id": 12345, "path": "demo/example-project"}
+        mr = {"iid": 7, "title": 'Review "example"', "author_id": 10001, "assignee_ids": [], "reviewer_ids": [10002]}
+        mr.update(merge_request)
+        return {"object_kind": "note", "event_type": "note", "project_id": project["id"], "project": {"id": project["id"]},
+                "user": {"id": actor_id, "name": "Example actor"},
+                "object_attributes": {"action": "create", "system": False, "noteable_type": "MergeRequest", "note": note,
+                    "url": f"https://gitlab.example.com/{project['path']}/-/merge_requests/7#note_1"},
+                "merge_request": mr}
+
+    def test_mr_comments_are_opt_in(self):
+        self.assertEqual(flow.simulate(self.config, self.mr_comment())["recipients"], [])
+        self.config["notify_mr_reviewers"] = True
+        self.assertEqual(flow.simulate(self.config, self.mr_comment())["recipients"], [])
+        with self.assertRaises(ValueError):
+            flow.validate_config(dict(self.config, notify_mr_comments="true"))
+
+    def test_mr_comment_notifies_reviewers_author_assignees_and_mentions(self):
+        self.config["notify_mr_comments"] = True
+        cases = [
+            ("author and reviewer", {}, ["owner@example.com", "member@example.com"]),
+            ("reviewer comments", {"actor_id": 10002}, ["owner@example.com"]),
+            ("reviewer alias comments", {"actor_id": 10003}, ["owner@example.com"]),
+            ("author comments", {"actor_id": 10001}, ["member@example.com"]),
+            ("assignee only", {"author_id": 10998, "reviewer_ids": [], "assignee_ids": [10002]}, ["member@example.com"]),
+            ("mention only", {"author_id": 10998, "reviewer_ids": [], "note": "@example-owner please look"},
+             ["owner@example.com"]),
+            ("unrelated, no mention", {"author_id": 10998, "reviewer_ids": []}, []),
+            ("missing lists", {"author_id": None, "reviewer_ids": None, "assignee_ids": None}, []),
+        ]
+        for scenario, changes, expected in cases:
+            with self.subTest(scenario=scenario):
+                self.assertEqual(flow.simulate(self.config, self.mr_comment(**changes))["recipients"], expected)
+        for attribute in ({"system": True}, {"action": "update"}):
+            event = self.mr_comment()
+            event["object_attributes"].update(attribute)
+            with self.subTest(attribute=attribute):
+                self.assertEqual(flow.simulate(self.config, event)["recipients"], [])
+        second = self.mr_comment(project={"id": 12346, "path": "demo/second-project"})
+        self.assertEqual(flow.simulate(self.config, second)["recipients"], ["owner@example.com"])
+        self.assertEqual(self.reply(), ["owner@example.com", "member@example.com"])
+
+    def test_mr_comment_card_links_to_the_comment(self):
+        self.config["notify_mr_comments"] = True
+        event = self.mr_comment()
+        card = flow.simulate(self.config, event)["card"]
+        self.assertEqual([card["body"][i].get("text") or card["body"][i]["inlines"][0]["text"] for i in range(3)],
+                         ["GitLab MR 有新回复", 'Review "example"', "Example project !7"])
+        self.assertEqual(card["actions"][0], {"type": "Action.OpenUrl", "title": "查看 MR",
+                                             "url": event["object_attributes"]["url"]})
+        reply = flow.simulate(self.config, dict(self.event, event_kind="note", action="create", issue_title="Issue",
+                                                issue_iid=5))["card"]
+        self.assertEqual([reply["body"][0]["text"], reply["body"][2]["inlines"][0]["text"]],
+                         ["GitLab 工作项有新回复", "Example project #5"])
+        self.assertEqual(reply["actions"][0]["title"], "打开工作项")
+
     def test_title_is_data_and_reply_uses_issue_iid(self):
         title = 'Quote " slash \\ newline\n@{triggerBody()} <b>literal</b>'
         result = flow.simulate(self.config, dict(self.event, event_kind="note", action="create",
