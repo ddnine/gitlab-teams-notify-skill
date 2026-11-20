@@ -6,7 +6,7 @@
 
 Teams Webhook 触发器的身份选项必须与 GitLab 发出的请求兼容。普通 GitLab 项目 Webhook 无法自动取得 Microsoft Entra 用户令牌。若采用 Anyone + 带签名的回调 URL，该 URL 就是凭据，应保存在 GitLab Webhook 设置和私有凭据存储中。它不等同于验证 GitLab 来源；有此要求时读 [permissions.md](permissions.md)。不要把管理页 URL 误填为回调 URL。
 
-先检查目标环境实际支持的连接器和操作。生成器中的 `teams_connection_reference` 必须替换为该流程的连接引用名称；它不是邮箱、访问令牌或完整 connection ID。生成结果只包含动作片段，不能直接作为完整流程包导入。
+先检查目标环境实际支持的连接器和操作。生成器中的 `teams_connection_reference` 必须替换为该流程 Teams 动作代码视图里 `host.connection` 的值（如 `shared_teams`）；它不是邮箱、访问令牌或完整 connection ID。解决方案内的流程可能显示为 `connectionReferenceName`，以实际代码视图为准。生成结果只包含动作片段，不能直接作为完整流程包导入。
 
 ## 动作布局
 
@@ -14,6 +14,9 @@ Teams Webhook 触发器的身份选项必须与 GitLab 发出的请求兼容。�
 
 | 名称 | 动作 | 关键设置 |
 | --- | --- | --- |
+| WebhookSecret | Compose | 粘贴 GitLab Secret token；设置中开启安全输入（Compose 会自动保护输出） |
+| VerifySource | Condition | 表达式结果等于 true 时进入 True 分支 |
+| RejectUnverifiedRequest | True 分支内，Terminate | Failed，False 分支留空 |
 | MemberMap | Compose | 唯一 ID、用户名、邮箱映射 |
 | PreviousAssignees | Select | 历史负责人投影为 `{id}` |
 | Actor | Filter array / Query | 在 MemberMap 中按 actor_id 找发言者 |
@@ -34,7 +37,7 @@ Compose 在部分中文界面显示为“编辑”。先用动作类别或英文
 
 确认 Maintainer / Owner 权限与当前 GitLab 版本，再配置项目 Webhook：
 
-1. 保留 SSL 校验，填入已创建流程的签名回调 URL。
+1. 保留 SSL 校验，填入已创建流程的签名回调 URL，并在 Secret token 填入与 `WebhookSecret` 相同的随机值（至少 32 个字符）。多个项目可共用同一流程与密钥；轮换时先改流程再逐个更新 Webhook。
 2. 选择 Issues / Work items 与 Comments / Notes 所需事件；机密事项事件仅在用户明确纳入范围时启用。
 3. 新接入默认留空 Custom webhook template，使用标准 GitLab 事件。标准负载包含项目与事项详情、回复正文等数据，会进入所选云流程及运行记录；先确认该目的地符合用户已授权的数据范围。生成器直接读取原生嵌套字段，同时兼容旧扁平字段，迁移时先更新云端表达式，再清空模板。
 4. 检查实际发出的 JSON，尤其 `changes.assignees.previous`、回复中的 `issue.author_id` / `issue.assignee_ids`、`object_attributes.action`、`object_attributes.note` 和事项 URL。入口不应要求旧模板独有的 `type=message`；先用仅操作者可收信的原生事件验证当前 Teams 触发器兼容性。

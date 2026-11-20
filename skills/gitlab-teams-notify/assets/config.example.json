@@ -1,10 +1,11 @@
 {
-  "project": {
-    "id": 12345,
-    "gitlab_url": "https://gitlab.example.com",
-    "path": "demo/example-project",
-    "display_name": "Example project"
-  },
+  "gitlab_url": "https://gitlab.example.com",
+  "projects": [
+    {"id": 12345, "path": "demo/example-project", "display_name": "Example project",
+     "member_ids": [10001, 10002, 10003]},
+    {"id": 12346, "path": "demo/second-project", "display_name": "Second project",
+     "member_ids": [10001]}
+  ],
   "members": [
     {"id": 10001, "username": "example-owner", "email": "owner@example.com"},
     {"id": 10002, "username": "example-member", "email": "member@example.com"},

@@ -53,6 +53,8 @@ class Expr:
             return compact(self.value)
         if self.kind == "get":
             return self.args[0].render() + "?[" + literal(self.value).render() + "]"
+        if self.kind == "index":
+            return self.args[0].render() + "?[" + self.args[1].render() + "]"
         return self.value + "(" + ",".join(arg.render() for arg in self.args) + ")"
 
     def code(self):
@@ -64,9 +66,12 @@ class Expr:
         if self.kind == "get":
             source = self.args[0].eval(context)
             return source.get(self.value) if isinstance(source, dict) else None
+        if self.kind == "index":
+            source, key = (arg.eval(context) for arg in self.args)
+            return source.get(key) if isinstance(source, dict) and isinstance(key, str) else None
         name = self.value
         values = [arg.eval(context) for arg in self.args]
-        if name in ("triggerBody", "item", "workflow"):
+        if name in ("triggerBody", "triggerOutputs", "item", "workflow"):
             return context[name]
         if name in ("body", "outputs", "items"):
             return context[name][values[0]]
@@ -106,11 +111,20 @@ class Expr:
             return "".join(as_string(v) for v in values)
         if name == "take":
             return values[0][:values[1]]
+        if name == "length":
+            return len(values[0])
+        if name == "greaterOrEquals":
+            return values[0] >= values[1]
         raise ValueError("unsupported offline expression")
 
 
 def literal(value):
     return Expr("literal", value)
+
+
+def index(source, key):
+    """Dynamic property lookup; key is an expression, unlike Expr.__getitem__."""
+    return Expr("index", None, (source if isinstance(source, Expr) else literal(source), key))
 
 
 def f(name, *values):
@@ -247,20 +261,12 @@ def https_url(value):
     return value.rstrip("/")
 
 
-def validate_config(raw):
-    config = copy.deepcopy(raw)
-    required = {"project", "members", "teams_connection_reference", "flow_management_url"}
-    allowed = required | {"notify_mr_reviewers"}
-    if not isinstance(config, dict) or not required <= config.keys() <= allowed:
-        raise ValueError("config must contain the required fields and only documented optional fields")
-    if type(config.get("notify_mr_reviewers", False)) is not bool:
-        raise ValueError("notify_mr_reviewers must be a boolean")
-    project = config["project"]
-    if not isinstance(project, dict) or set(project) != {"id", "gitlab_url", "path", "display_name"}:
+def validate_project(project, seen):
+    if not isinstance(project, dict) or set(project) != {"id", "path", "display_name", "member_ids"}:
         raise ValueError("project fields do not match the example schema")
-    if not positive_id(project["id"]):
-        raise ValueError("project.id must be a positive numeric ID")
-    project["gitlab_url"] = https_url(project["gitlab_url"])
+    if not positive_id(project["id"]) or project["id"] in seen:
+        raise ValueError("project IDs must be positive, numeric and unique")
+    seen.add(project["id"])
     path = project["path"]
     if (not isinstance(path, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", path)
             or any(part in (".", "..") for part in path.split("/"))):
@@ -268,6 +274,43 @@ def validate_config(raw):
     label = project["display_name"]
     if not isinstance(label, str) or not 1 <= len(label.strip()) <= 120:
         raise ValueError("project.display_name must contain 1 to 120 characters")
+    member_ids = project["member_ids"]
+    if (not isinstance(member_ids, list) or not all(positive_id(i) for i in member_ids)
+            or len(set(member_ids)) != len(member_ids)):
+        raise ValueError("project.member_ids must be unique positive numeric IDs")
+
+
+def upgrade_legacy_config(config):
+    """Accept the original single-project schema; every mapped member belongs to that project."""
+    if {"gitlab_url", "projects"} & config.keys():
+        raise ValueError("use either the legacy project field or gitlab_url/projects, not both")
+    project = config.pop("project")
+    if not isinstance(project, dict) or set(project) != {"id", "gitlab_url", "path", "display_name"}:
+        raise ValueError("project fields do not match the legacy schema")
+    members = config.get("members")
+    ids = [m.get("id") for m in members if isinstance(m, dict)] if isinstance(members, list) else []
+    config["gitlab_url"] = project.pop("gitlab_url")
+    config["projects"] = [dict(project, member_ids=list(dict.fromkeys(i for i in ids if positive_id(i))))]
+    return config
+
+
+def validate_config(raw):
+    config = copy.deepcopy(raw)
+    if isinstance(config, dict) and "project" in config:
+        config = upgrade_legacy_config(config)
+    required = {"gitlab_url", "projects", "members", "teams_connection_reference", "flow_management_url"}
+    allowed = required | {"notify_mr_reviewers"}
+    if not isinstance(config, dict) or not required <= config.keys() <= allowed:
+        raise ValueError("config must contain the required fields and only documented optional fields")
+    if type(config.get("notify_mr_reviewers", False)) is not bool:
+        raise ValueError("notify_mr_reviewers must be a boolean")
+    config["gitlab_url"] = https_url(config["gitlab_url"])
+    projects = config["projects"]
+    if not isinstance(projects, list) or not projects:
+        raise ValueError("projects must be a nonempty array")
+    seen_projects = set()
+    for project in projects:
+        validate_project(project, seen_projects)
     members = config["members"]
     if not isinstance(members, list) or not members:
         raise ValueError("members must be a nonempty array")
@@ -332,10 +375,45 @@ def recipient_rule(config):
     routes = [assigned, replied]
     if config.get("notify_mr_reviewers", False):
         routes.append(reviewer_rule(event, member["id"]))
-    project = config["project"]
-    return f("and", f("equals", event["project_id"], project["id"]),
-        f("startsWith", f("coalesce", event["url"], ""), project["gitlab_url"] + "/" + project["path"] + "/"),
-        f("or", *routes))
+    return f("and", project_scope(config), f("or", *routes))
+
+
+def project_scope(config):
+    """Allowlisted project, matching URL, and the recipient is a member of that same project.
+
+    Membership gating keeps @-mentions and stale authors from sending titles to people
+    outside the project; member_ids is refreshed by sync_members.py, not checked live.
+    """
+    event, member = EventFields(), f("item")
+    clauses = [f("and", f("equals", event["project_id"], project["id"]),
+        f("startsWith", f("coalesce", event["url"], ""), config["gitlab_url"] + "/" + project["path"] + "/"),
+        f("contains", project["member_ids"], member["id"])) for project in config["projects"]]
+    return clauses[0] if len(clauses) == 1 else f("or", *clauses)
+
+
+def project_label(config):
+    labels = {str(project["id"]): project["display_name"] for project in config["projects"]}
+    return f("coalesce", index(labels, f("string", EventFields()["project_id"])), "GitLab")
+
+
+SECRET_PLACEHOLDER = "REPLACE_IN_UI_WITH_GITLAB_SECRET_TOKEN"
+SECRET_MIN_LENGTH = 32
+
+
+def source_check():
+    """GitLab's X-Gitlab-Token header must equal the secret pasted into WebhookSecret.
+
+    The secret is entered in the flow UI, never in the config or generated files; the
+    placeholder and short values fail closed.
+    """
+    secret = f("outputs", "WebhookSecret")
+    return f("and", f("not", f("equals", secret, SECRET_PLACEHOLDER)),
+        f("greaterOrEquals", f("length", f("string", secret)), SECRET_MIN_LENGTH),
+        f("equals", f("triggerOutputs")["headers"]["X-Gitlab-Token"], secret))
+
+
+def verify_source(headers, secret):
+    return source_check().eval({"triggerOutputs": {"headers": headers}, "outputs": {"WebhookSecret": secret}})
 
 
 def card_expression(config):
@@ -343,7 +421,7 @@ def card_expression(config):
     note = f("equals", event["event_kind"], "note")
     title = f("if", note, event["issue_title"], event["item_title"])
     iid = f("if", note, event["issue_iid"], event["item_iid"])
-    project_name = config["project"]["display_name"]
+    project_name = project_label(config)
     heading = f("if", note, "GitLab 工作项有新回复", "GitLab 工作项分配提醒")
     reference = f("concat", project_name, " #", f("string", iid))
     action = f("setProperty", {"type": "Action.OpenUrl", "title": "打开工作项"}, "url", event["url"])
@@ -371,6 +449,15 @@ def build_actions(config):
     def add(name, action):
         action["runAfter"] = {next(reversed(actions)): ["Succeeded"]} if actions else {}
         actions[name] = action
+    # Secure inputs keep the pasted secret out of run history; Compose then secures its outputs too.
+    add("WebhookSecret", {"type": "Compose", "inputs": SECRET_PLACEHOLDER,
+        "runtimeConfiguration": {"secureData": {"properties": ["inputs"]}}})
+    # Failed (not Cancelled) so a wrong token on the GitLab side is visible to flow owners.
+    add("VerifySource", {"type": "If", "expression": f("not", source_check()).code(),
+        "actions": {"RejectUnverifiedRequest": {"type": "Terminate", "runAfter": {}, "inputs": {
+            "runStatus": "Failed", "runError": {"code": "UnverifiedWebhookSource",
+                "message": "X-Gitlab-Token did not match WebhookSecret; no notifications were sent."}}}},
+        "else": {"actions": {}}})
     add("MemberMap", {"type": "Compose", "inputs": literal(config["members"]).code()})
     add("PreviousAssignees", {"type": "Select", "inputs": {
         "from": f("coalesce", event_field("previous_assignees"), []).code(),
@@ -384,7 +471,8 @@ def build_actions(config):
     def connector(operation, params):
         return {"type": "OpenApiConnection", "inputs": {"host": {
             "apiId": "/providers/Microsoft.PowerApps/apis/shared_teams",
-            "connectionReferenceName": config["teams_connection_reference"],
+            # Matches the v3 designer's code view for non-solution flows.
+            "connection": config["teams_connection_reference"],
             "operationId": operation}, "parameters": params}}
     post = connector("PostCardToConversation", {
         "poster": "Flow bot", "location": "Chat with Flow bot",
@@ -395,7 +483,7 @@ def build_actions(config):
         f("body", "RecipientEmails"), f("body", "RecipientEmails")).code(), "actions": {"PostCard": post}})
     run_url = f("concat", config["flow_management_url"].removesuffix("/details") + "/runs/", f("workflow")["run"]["name"])
     alert = connector("PostMessageToSelf", {"body/body/contentType": "text", "body/body/content": f("concat",
-        "GitLab → Teams 通知失败\n项目：", config["project"]["display_name"], "\n检查运行：", run_url,
+        "GitLab → Teams 通知失败\n项目：", project_label(config), "\n检查运行：", run_url,
         "\n可能已有部分消息送达，请检查失败收件人后再重试。").code()})
     alert["runAfter"] = {"SendNotifications": ["Failed", "TimedOut", "Skipped"]}
     actions["FailureAlert"] = alert
@@ -418,7 +506,8 @@ def simulate(config, event):
     rule = recipient_rule(config)
     recipients = [m["email"] for m in config["members"] if rule.eval(dict(context, item=m))]
     return {"recipients": unique(recipients), "card": card_expression(config).eval(context),
-        "limitations": ["offline simulation only", "no runtime permission check", "no cross-run deduplication"]}
+        "limitations": ["offline simulation only", "source token check not simulated",
+                        "member_ids are a synced snapshot, not a live permission check", "no cross-run deduplication"]}
 
 
 def expression_fields(value, path=""):
@@ -466,6 +555,11 @@ def main():
         actions = build_actions(config)
         files = {"power-automate-actions.json": actions, "ui-values.json": {
             "format": "actions fragment, not an importable flow package",
+            "manual_steps": [
+                "WebhookSecret: replace the placeholder with the GitLab hook's secret token "
+                f"(at least {SECRET_MIN_LENGTH} characters) and turn on Secure inputs (Compose secures outputs automatically)",
+                "VerifySource: Condition whose expression is the listed value, compared to true; "
+                "put RejectUnverifiedRequest in the True branch and leave False empty"],
             "expression_fields": expression_fields(actions)}}
         if args.event:
             files["simulation.json"] = simulate(config, json.loads(args.event.read_text(encoding="utf-8")))
